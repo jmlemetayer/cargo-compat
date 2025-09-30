@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+
+import argparse
+import contextlib
+import logging
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+@contextlib.contextmanager
+def working_directory(path):
+    """Change working directory."""
+    cwd = os.getcwd()
+    if path is not None:
+        os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(cwd)
+
+
+class CommandNotFoundError(FileNotFoundError):
+    def __init__(self, command):
+        msg = (
+            f"\n\nPROCESS: {shlex.join(command)}"
+            f"\n\nSTDERR:  {command[0]}: command not found"
+        )
+        super().__init__(msg)
+
+
+class CommandError(RuntimeError):
+    def __init__(self, completed):
+        self.command = completed.args
+        self.returncode = completed.returncode
+        self.stdout = completed.stdout.decode("utf-8").splitlines()
+        self.stderr = completed.stderr.decode("utf-8").splitlines()
+        msg = (
+            f"\n\nPROCESS: {shlex.join(completed.args)}"
+            f"\n\nRETURN:  {completed.returncode}"
+            f"\n\nSTDOUT:\n{completed.stdout.decode('utf-8')}"
+            f"\n\nSTDERR:\n{completed.stderr.decode('utf-8')}"
+        )
+        super().__init__(msg)
+
+
+def command_run(*args, **kwargs):
+    command_parts = [str(x) for x in args]
+
+    logger.debug(f"COMMAND: {shlex.join(command_parts)}")
+
+    try:
+        completed = subprocess.run(  # noqa: S603
+            command_parts,
+            shell=False,
+            check=False,
+            capture_output=True,
+            env=kwargs.get("_env"),
+        )
+    except FileNotFoundError:
+        raise CommandNotFoundError(command_parts)
+
+    if completed.returncode not in kwargs.get("_ok_code", [0]):
+        raise CommandError(completed)
+
+
+def parse_version(version):
+    if version is None:
+        return ()
+    try:
+        match = re.fullmatch(r"(\d+)(?:\.(\d+)(?:\.(\d+))?)?", version)
+        return tuple(int(x) for x in match.groups() if x)
+    except AttributeError as error:
+        raise ValueError("Invalid version string") from error
+
+
+def toolchain_str(toolchain):
+    return ".".join(tuple(map(str, toolchain)))
+
+
+def resolve_compatible_crate_version(crate, toolchain):
+    response = requests.get(
+        f"https://crates.io/api/v1/crates/{crate}/versions?per_page=100&sort=semver",
+        timeout=10,
+    )
+    for version in response.json()["versions"]:
+        crate_version = version["num"]
+        rust_version = parse_version(version["rust_version"])
+        if rust_version <= toolchain:
+            return crate_version
+
+
+def cargo_update(crate_with_version, new_version):
+    logger.info(f"Updating crate {crate_with_version} to {new_version}")
+    command_run("cargo", "update", f"{crate_with_version}", "--precise", new_version)
+
+
+def handle_update_error(error, toolchain):
+    for line in error.stderr:
+        match = re.fullmatch(
+            r"required by package `(?P<crate>\w+) v(?P<version>[\d\.]+)`", line
+        )
+        if match:
+            crate_with_version = f"{match['crate']}@{match['version']}"
+            logger.debug(f"The crate {crate_with_version} needs an update")
+            new_version = resolve_compatible_crate_version(match["crate"], toolchain)
+            return try_update(crate_with_version, new_version, toolchain)
+    raise RuntimeError("Failed to parse 'cargo update' traces")
+
+
+def try_update(crate, version, toolchain):
+    try:
+        cargo_update(crate, version)
+    except CommandError as error:
+        handle_update_error(error, toolchain)
+    else:
+        logger.debug("Update done")
+
+
+def cargo_check(toolchain):
+    logger.info("Checking build...")
+    command_run("cargo", f"+{toolchain_str(toolchain)}", "check")
+
+
+def handle_check_error(error, toolchain):
+    for line in error.stderr:
+        match = re.fullmatch(
+            r"cargo update (?P<crate>\w+)@(?P<version>[\d\.]+) \-\-precise ver", line
+        )
+        if match:
+            crate_with_version = f"{match['crate']}@{match['version']}"
+            logger.debug(f"The crate {crate_with_version} needs an update")
+            new_version = resolve_compatible_crate_version(match["crate"], toolchain)
+            try_update(crate_with_version, new_version, toolchain)
+            return try_check(toolchain)
+    raise RuntimeError("Failed to parse 'cargo check' traces")
+
+
+def try_check(toolchain):
+    try:
+        cargo_check(toolchain)
+    except CommandError as error:
+        handle_check_error(error, toolchain)
+    else:
+        logger.info("Done")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Update dependencies compatible with a toolchain"
+    )
+
+    parser.register("type", "semver", lambda v: parse_version(v))
+    parser.add_argument("TOOLCHAIN", type="semver", help="the toolchain override")
+    parser.add_argument(
+        "-C",
+        metavar="PATH",
+        dest="working_directory",
+        help="change the working directory",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="show debug logs")
+
+    if len(sys.argv) > 1 and sys.argv[1] == "compat":
+        del sys.argv[1]
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        format="%(levelname)s: %(message)s",
+        level=logging.DEBUG if args.verbose else logging.INFO,
+    )
+
+    with working_directory(args.working_directory):
+        try_check(args.TOOLCHAIN)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
