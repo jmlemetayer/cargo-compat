@@ -1,0 +1,7 @@
+target-version = "py312"
+
+[lint]
+select = ["A", "C90", "E", "F", "I", "N", "PL", "S", "UP", "W", "RUF", "SIM"]
+
+[lint.isort]
+force-single-line = true

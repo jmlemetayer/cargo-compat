@@ -184,7 +184,7 @@ def main():
         description="Update dependencies compatible with a toolchain"
     )
 
-    parser.register("type", "semver", lambda v: parse_version(v))
+    parser.register("type", "semver", toolchain_version)
     parser.add_argument("TOOLCHAIN", type="semver", help="the toolchain override")
     parser.add_argument(
         "-C",
