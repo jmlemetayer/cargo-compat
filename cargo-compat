@@ -98,9 +98,16 @@ def resolve_compatible_crate_version(crate, toolchain):
             return crate_version
 
 
-def cargo_update(crate_with_version, new_version):
+def cargo_update(crate_with_version, new_version, toolchain):
     logger.info(f"Updating crate {crate_with_version} to {new_version}")
-    command_run("cargo", "update", f"{crate_with_version}", "--precise", new_version)
+    command_run(
+        "cargo",
+        f"+{toolchain_str(toolchain)}",
+        "update",
+        f"{crate_with_version}",
+        "--precise",
+        new_version,
+    )
 
 
 def handle_update_error(error, toolchain):
@@ -118,7 +125,7 @@ def handle_update_error(error, toolchain):
 
 def try_update(crate, version, toolchain):
     try:
-        cargo_update(crate, version)
+        cargo_update(crate, version, toolchain)
     except CommandError as error:
         handle_update_error(error, toolchain)
     else:
