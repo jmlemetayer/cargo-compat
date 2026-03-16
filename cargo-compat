@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
+from collections.abc import Generator
 
 import requests
 
@@ -23,7 +24,7 @@ SEMVER_REGEX = (
 
 
 @contextlib.contextmanager
-def working_directory(path):
+def working_directory(path: str | None) -> Generator[None, None, None]:
     """Change working directory."""
     cwd = os.getcwd()
     if path is not None:
@@ -35,7 +36,7 @@ def working_directory(path):
 
 
 class CommandNotFoundError(FileNotFoundError):
-    def __init__(self, command):
+    def __init__(self, command: list[str]) -> None:
         msg = (
             f"\n\nPROCESS: {shlex.join(command)}"
             f"\n\nSTDERR:  {command[0]}: command not found"
@@ -44,7 +45,7 @@ class CommandNotFoundError(FileNotFoundError):
 
 
 class CommandError(RuntimeError):
-    def __init__(self, completed):
+    def __init__(self, completed: subprocess.CompletedProcess[bytes]) -> None:
         self.command = completed.args
         self.returncode = completed.returncode
         self.stdout = completed.stdout.decode("utf-8").splitlines()
@@ -58,7 +59,11 @@ class CommandError(RuntimeError):
         super().__init__(msg)
 
 
-def command_run(*args, **kwargs):
+def command_run(
+    *args: str,
+    _env: dict[str, str] | None = None,
+    _ok_code: list[int] | None = None,
+) -> None:
     command_parts = [str(x) for x in args]
 
     logger.debug(f"COMMAND: {shlex.join(command_parts)}")
@@ -69,16 +74,16 @@ def command_run(*args, **kwargs):
             shell=False,
             check=False,
             capture_output=True,
-            env=kwargs.get("_env"),
+            env=_env,
         )
     except FileNotFoundError:
         raise CommandNotFoundError(command_parts)
 
-    if completed.returncode not in kwargs.get("_ok_code", [0]):
+    if completed.returncode not in (_ok_code or [0]):
         raise CommandError(completed)
 
 
-def toolchain_version(version):
+def toolchain_version(version: str | None) -> tuple[int, ...]:
     if version is None:
         return ()
     try:
@@ -90,11 +95,13 @@ def toolchain_version(version):
         raise ValueError("Invalid version string") from error
 
 
-def toolchain_str(toolchain):
+def toolchain_str(toolchain: tuple[int, ...]) -> str:
     return ".".join(tuple(map(str, toolchain)))
 
 
-def resolve_compatible_crate_version(crate, toolchain):
+def resolve_compatible_crate_version(
+    crate: str, toolchain: tuple[int, ...]
+) -> str | None:
     response = requests.get(
         f"https://crates.io/api/v1/crates/{crate}/versions?per_page=100&sort=semver",
         timeout=10,
@@ -104,9 +111,12 @@ def resolve_compatible_crate_version(crate, toolchain):
         rust_version = toolchain_version(version["rust_version"])
         if rust_version <= toolchain:
             return crate_version
+    return None
 
 
-def cargo_update(crate_with_version, new_version, toolchain):
+def cargo_update(
+    crate_with_version: str, new_version: str, toolchain: tuple[int, ...]
+) -> None:
     logger.info(f"Updating crate {crate_with_version} to {new_version}")
     command_run(
         "cargo",
@@ -118,7 +128,7 @@ def cargo_update(crate_with_version, new_version, toolchain):
     )
 
 
-def handle_update_error(error, toolchain):
+def handle_update_error(error: CommandError, toolchain: tuple[int, ...]) -> None:
     for line in error.stderr:
         match = re.fullmatch(
             rf"required by package `(?P<crate>\S+) v{SEMVER_REGEX}`", line
@@ -131,7 +141,7 @@ def handle_update_error(error, toolchain):
     raise RuntimeError("Failed to parse 'cargo update' traces")
 
 
-def try_update(crate, version, toolchain):
+def try_update(crate: str, version: str | None, toolchain: tuple[int, ...]) -> None:
     try:
         cargo_update(crate, version, toolchain)
     except CommandError as error:
@@ -140,12 +150,12 @@ def try_update(crate, version, toolchain):
         logger.debug("Update done")
 
 
-def cargo_check(toolchain):
+def cargo_check(toolchain: tuple[int, ...]) -> None:
     logger.info("Checking build...")
     command_run("cargo", f"+{toolchain_str(toolchain)}", "check")
 
 
-def handle_check_error(error, toolchain):
+def handle_check_error(error: CommandError, toolchain: tuple[int, ...]) -> None:
     for line in error.stderr:
         match = re.fullmatch(
             rf"cargo update (?P<crate>[^@]+)@{SEMVER_REGEX} \-\-precise ver", line
@@ -170,7 +180,7 @@ def handle_check_error(error, toolchain):
     raise RuntimeError("Failed to parse 'cargo check' traces")
 
 
-def try_check(toolchain):
+def try_check(toolchain: tuple[int, ...]) -> None:
     try:
         cargo_check(toolchain)
     except CommandError as error:
@@ -179,7 +189,7 @@ def try_check(toolchain):
         logger.info("Done")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Update dependencies compatible with a toolchain"
     )
