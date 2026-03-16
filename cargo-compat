@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+SEMVER_REGEX = (
+    r"(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"
+    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?"
+)
+
 
 @contextlib.contextmanager
 def working_directory(path):
@@ -72,11 +78,13 @@ def command_run(*args, **kwargs):
         raise CommandError(completed)
 
 
-def parse_version(version):
+def toolchain_version(version):
     if version is None:
         return ()
     try:
-        match = re.fullmatch(r"(\d+)(?:\.(\d+)(?:\.(\d+))?)?", version)
+        match = re.fullmatch(
+            r"(0|[1-9]\d*)(?:\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?)?", version
+        )
         return tuple(int(x) for x in match.groups() if x)
     except AttributeError as error:
         raise ValueError("Invalid version string") from error
@@ -93,7 +101,7 @@ def resolve_compatible_crate_version(crate, toolchain):
     )
     for version in response.json()["versions"]:
         crate_version = version["num"]
-        rust_version = parse_version(version["rust_version"])
+        rust_version = toolchain_version(version["rust_version"])
         if rust_version <= toolchain:
             return crate_version
 
@@ -113,7 +121,7 @@ def cargo_update(crate_with_version, new_version, toolchain):
 def handle_update_error(error, toolchain):
     for line in error.stderr:
         match = re.fullmatch(
-            r"required by package `(?P<crate>\w+) v(?P<version>[\d\.]+)`", line
+            rf"required by package `(?P<crate>\S+) v{SEMVER_REGEX}`", line
         )
         if match:
             crate_with_version = f"{match['crate']}@{match['version']}"
@@ -140,7 +148,7 @@ def cargo_check(toolchain):
 def handle_check_error(error, toolchain):
     for line in error.stderr:
         match = re.fullmatch(
-            r"cargo update (?P<crate>\w+)@(?P<version>[\d\.]+) \-\-precise ver", line
+            rf"cargo update (?P<crate>[^@]+)@{SEMVER_REGEX} \-\-precise ver", line
         )
         if match:
             crate_with_version = f"{match['crate']}@{match['version']}"
