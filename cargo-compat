@@ -156,6 +156,17 @@ def handle_check_error(error, toolchain):
             new_version = resolve_compatible_crate_version(match["crate"], toolchain)
             try_update(crate_with_version, new_version, toolchain)
             return try_check(toolchain)
+
+        match = re.fullmatch(
+            rf"error: failed to download `(?P<crate>\S+) v{SEMVER_REGEX}`", line
+        )
+        if match:
+            crate_with_version = f"{match['crate']}@{match['version']}"
+            logger.debug(f"The crate {crate_with_version} needs an update")
+            new_version = resolve_compatible_crate_version(match["crate"], toolchain)
+            try_update(crate_with_version, new_version, toolchain)
+            return try_check(toolchain)
+
     raise RuntimeError("Failed to parse 'cargo check' traces")
 
 
